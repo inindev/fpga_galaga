@@ -1,0 +1,25 @@
+# OS / editor
+**/.DS_Store
+*~
+*.bak
+*.orig
+*.rej
+*.old
+*.log
+.claude/settings.local.json
+
+# Gowin build output
+impl/
+*.fs
+*.binx
+*.vg
+*.timing_paths
+*.gprj.user
+
+# Simulation output (ROM images, streams, pictures)
+sim/out/
+
+# ROM images: never commit game data
+tang/**/roms/
+*.zip
+*.rom
