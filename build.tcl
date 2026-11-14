@@ -1,30 +1,66 @@
 # Gowin build script for the Galaga core (TangCore), run from this folder:
 #
 #   gw_sh build.tcl nano20k
+#   gw_sh build.tcl console60k|console138k|primer25k [ds2|snes]
 #
 # gw_sh is in the bin directory of the Gowin IDE install (add it to PATH or give its full path).
-# Results go to ./impl: impl/pnr/galaga_nano20k.{fs,bin}, reports in impl/gwsynthesis and
-# impl/pnr. The .bin goes on the TangCore USB drive as cores/nano20k/galaga.bin.
+# Results go to ./impl: impl/pnr/galaga_<board>[_snes].{fs,bin}, reports in
+# impl/gwsynthesis and impl/pnr. The .bin goes on the TangCore drive as
+# cores/<board>/galaga.bin (snescontroller/cores/<board>/ for a _snes build).
+#
+# The board layer shared by every board is in tang/nano20k/. The GW5A boards (Tang Console
+# 60K/138K, Primer 25K) share tang/gw5a/ (16-bit SDRAM controller, USB host, .sdc) and have
+# their own pins and board defines in tang/console/ and tang/primer25k/; tang/pll/ has the
+# GW5AST-138 PLLs, tang/plla/ the GW5AT-60 and GW5A-25 ones.
 
-if {$argc != 1 || [lindex $argv 0] ne "nano20k"} {
+set boards {nano20k console60k console138k primer25k}
+set dev  [lindex $argv 0]
+set ctrl [expr {$argc >= 2 ? [lindex $argv 1] : "ds2"}]
+if {$argc < 1 || $argc > 2 || [lsearch $boards $dev] < 0 || [lsearch {ds2 snes} $ctrl] < 0 ||
+    ($dev eq "nano20k" && $argc == 2)} {
     puts "Usage: gw_sh build.tcl nano20k"
-    puts "    nano20k: Sipeed Tang Nano 20K (the only board for now)"
+    puts "       gw_sh build.tcl console60k|console138k|primer25k \[ds2|snes\]"
+    puts "    nano20k:     Sipeed Tang Nano 20K (DualShock and SNES pads together)"
+    puts "    console60k, console138k: Sipeed Tang Console, DualShock (default) or SNES pads on PMOD1"
+    puts "    primer25k:   Sipeed Tang Primer 25K with the Tang SDRAM module, DualShock or SNES pads"
     exit 1
 }
-set dev [lindex $argv 0]
 set brd tang/nano20k
+set gw5 tang/gw5a
 
-set_device GW2AR-LV18QN88C8/I7 -device_version C
+switch $dev {
+    nano20k     { set_device GW2AR-LV18QN88C8/I7 -device_version C }
+    console138k { set_device GW5AST-LV138PG484AC1/I0 -device_version B
+                  set pll tang/pll;  set bdir tang/console;   set bname console }
+    console60k  { set_device GW5AT-LV60PG484AC1/I0 -device_version B
+                  set pll tang/plla; set bdir tang/console;   set bname console }
+    primer25k   { set_device GW5A-LV25MG121NC1/I0 -device_version A
+                  set pll tang/plla; set bdir tang/primer25k; set bname primer25k }
+}
+if {$dev ne "nano20k"} {
+    # board defines, before top.sv
+    set bfile [expr {$ctrl eq "snes" ? "${bname}_snescontroller" : $bname}]
+    add_file -type verilog "$bdir/$bfile.v"
+}
 
 # ---- board level
 add_file -type verilog "$brd/top.sv"
-add_file -type verilog "$brd/gowin_pll_hdmi.v"
-add_file -type verilog "$brd/gowin_pll_game.v"
+if {$dev eq "nano20k"} {
+    add_file -type verilog "$brd/gowin_pll_hdmi.v"
+    add_file -type verilog "$brd/gowin_pll_game.v"
+} else {
+    add_file -type verilog "$pll/gowin_pll_game.v"
+    add_file -type verilog "$pll/gowin_pll_27.v"
+    add_file -type verilog "$pll/gowin_pll_hdmi.v"
+    add_file -type verilog "$pll/pll_12.v"
+    add_file -type verilog "$pll/gowin_pll_sdram.v"
+    add_file -type verilog "$gw5/usb_hid_host.v"
+}
 add_file -type verilog "$brd/rom_stream.sv"
 add_file -type verilog "$brd/framebuffer.sv"
 add_file -type verilog "$brd/fb_writer.sv"
 add_file -type verilog "$brd/fb_reader.sv"
-add_file -type verilog "$brd/sdram.v"
+add_file -type verilog [expr {$dev eq "nano20k" ? "$brd/sdram.v" : "$gw5/sdram16.v"}]
 add_file -type verilog "$brd/controller_snes.v"
 add_file -type verilog "$brd/controller_ds2.sv"
 add_file -type verilog "$brd/dualshock_controller.v"
@@ -48,8 +84,13 @@ foreach f {cpu/T80_Pack cpu/T80_MCode cpu/T80_ALU cpu/T80_Reg cpu/T80 cpu/T80se 
     add_file -type vhdl "rtl/$f.vhd"
 }
 
-add_file -type cst "$brd/nano20k.cst"
-add_file -type sdc "$brd/galaga.sdc"
+if {$dev eq "nano20k"} {
+    add_file -type cst "$brd/nano20k.cst"
+    add_file -type sdc "$brd/galaga.sdc"
+} else {
+    add_file -type cst "$bdir/$bfile.cst"
+    add_file -type sdc "$gw5/galaga.sdc"
+}
 
 set_option -synthesis_tool gowinsynthesis
 set_option -top_module top
@@ -68,6 +109,7 @@ set_option -use_ready_as_gpio 1
 set_option -use_done_as_gpio 1
 set_option -use_i2c_as_gpio 1
 set_option -use_cpu_as_gpio 1
-set_option -output_base_name galaga_${dev}
+# DS2 (and Nano 20K) builds keep the plain name the drive uses
+set_option -output_base_name [expr {$ctrl eq "snes" ? "galaga_${dev}_snes" : "galaga_${dev}"}]
 
 run all

@@ -25,16 +25,29 @@
 //   board button S1: coin and 1P start together
 // While the menu is shown (not the volume strip) the game is paused (the core's pause input,
 // which stops all its clock enables) and gets no buttons.
+//
+// Other boards: this file is the top level for every board. A board file read before it
+// (tang/console/, tang/primer25k/) sets the differences: GW5A (Tang Console 60K/138K, Primer
+// 25K: 50 MHz clock, their PLLs, front USB host, no onboard amp or RGB LED), S1_ACTIVE_LOW,
+// SDRAM16 (the 16-bit Tang SDRAM module, tang/gw5a/sdram16.v), USB2 (a second USB port) and
+// the pads (CONTROLLER_SNES or CONTROLLER_DS2, as they share one PMOD). Without a board file it
+// is the Tang Nano 20K, with both pad types.
+
+`ifndef GW5A
+`define CONTROLLER_SNES
+`define CONTROLLER_DS2
+`endif
 
 module top (
-    input  logic        sys_clk,                // 27 MHz, pin 4
-    input  logic        s1,                     // board button S1, active high (pin 88)
+    input  logic        sys_clk,                // 27 MHz, pin 4 (GW5A boards: 50 MHz)
+    input  logic        s1,                     // board button S1, active high (pin 88) (Console: active low)
     output logic [1:0]  led,                    // active low
 
     // UART to the BL616
     input  logic        UART_RXD,
     output logic        UART_TXD,
 
+`ifdef CONTROLLER_SNES
     // SNES controllers
     output logic        joy1_strb,
     output logic        joy1_clk,
@@ -42,7 +55,9 @@ module top (
     output logic        joy2_strb,
     output logic        joy2_clk,
     input  logic        joy2_data,
+`endif
 
+`ifdef CONTROLLER_DS2
     // DualShock controllers
     output logic        ds_clk,
     input  logic        ds_miso,
@@ -52,11 +67,36 @@ module top (
     input  logic        ds_miso2,
     output logic        ds_mosi2,
     output logic        ds_cs2,
+`endif
 
+`ifdef GW5A
+    // front USB-A ports: USB host on the FPGA (usb_hid_host.v)
+    inout  wire         usb1_dp,
+    inout  wire         usb1_dn,
+`ifdef USB2
+    inout  wire         usb2_dp,
+    inout  wire         usb2_dn,
+`endif
+`endif
+
+`ifndef GW5A
     // onboard parts
     output logic        pa_en,                  // audio amp enable: held off
     output logic        ws2812,                 // RGB LED: sent "off" once at power-up
+`endif
 
+`ifdef SDRAM16
+    // Tang SDRAM module (16-bit); the header has no CKE pin
+    output logic        O_sdram_clk,
+    output logic        O_sdram_cs_n,
+    output logic        O_sdram_cas_n,
+    output logic        O_sdram_ras_n,
+    output logic        O_sdram_wen_n,
+    inout  wire  [15:0] IO_sdram_dq,
+    output logic [12:0] O_sdram_addr,
+    output logic [1:0]  O_sdram_ba,
+    output logic [1:0]  O_sdram_dqm,
+`else
     // embedded SDRAM (no pin constraints: placed by the tool)
     output logic        O_sdram_clk,
     output logic        O_sdram_cke,
@@ -68,6 +108,7 @@ module top (
     output logic [10:0] O_sdram_addr,
     output logic [1:0]  O_sdram_ba,
     output logic [3:0]  O_sdram_dqm,
+`endif
 
     // HDMI
     output logic        tmds_clk_n,
@@ -83,6 +124,26 @@ module top (
     logic hclk5, hclk;
     logic sys_resetn = 1'b0;            // see "resets" below
 
+`ifdef GW5A
+    // 50 MHz -> 27 MHz, as fpga_nestang's Console build; from it the game PLL (48 and 32 MHz)
+    // and the HDMI PLL
+    logic clk27;
+    gowin_pll_27 u_pll_27 (
+        .clkin  (sys_clk),
+        .clkout0(clk27)
+    );
+
+    gowin_pll_game u_pll_game (
+        .clkin  (clk27),
+        .clkout0(clkm_48MHZ),
+        .clkout1(clkm_32MHZ)
+    );
+
+    gowin_pll_hdmi u_pll_hdmi (
+        .clkin (clk27),
+        .clkout(hclk5)
+    );
+`else
     gowin_pll_game u_pll_game (
         .clkin   (sys_clk),
         .clkout  (),                    // 96 MHz, not used
@@ -96,6 +157,7 @@ module top (
         .clkout(hclk5),
         .lock  ()
     );
+`endif
 
     CLKDIV #(.DIV_MODE(5)) u_div5 (
         .CLKOUT(hclk),
@@ -104,6 +166,20 @@ module top (
         .CALIB (1'b0)
     );
 
+`ifdef GW5A
+    // SDRAM clocks as fpga_nestang / fpga_snestang on the Tang Console: the controller on
+    // 64.5 MHz (clk_sd), the SDRAM clock pin a second output of the same PLL, 225 degrees later.
+    // sd_resetn is the system reset in clk_sd's domain (first flop *_meta, see the .sdc).
+    logic clk_sd;
+    gowin_pll_sdram u_pll_sdram (
+        .clkin  (sys_clk),
+        .clkout0(),
+        .clkout1(clk_sd),
+        .clkout2(O_sdram_clk)
+    );
+    logic sd_rst_meta = 1'b0, sd_resetn = 1'b0;
+    always_ff @(posedge clk_sd) {sd_resetn, sd_rst_meta} <= {sd_rst_meta, sys_resetn};
+`else
     // SDRAM clock = ~clkm_32MHZ, made by an ODDR in the I/O block (low after the rising
     // edge, high after the falling edge) so its delay does not depend on placement.
     ODDR u_sdram_clk (
@@ -114,7 +190,9 @@ module top (
         .TX (1'b0),
         .CLK(clkm_32MHZ)
     );
+`endif
 
+`ifndef GW5A
     // ------------------------------------------------------------------ onboard parts
     // Keep the onboard audio amp off (MAX98357A SD_MODE, low = shutdown)
     assign pa_en = 1'b0;
@@ -147,6 +225,7 @@ module top (
         end
     end
     assign ws2812 = ws_out;
+`endif
 
     // ------------------------------------------------------------------ resets
     // One system reset, released once 65535 clocks (about 2 ms) after power-up and never asserted
@@ -157,6 +236,30 @@ module top (
         if (resetcnt == 0)
             sys_resetn <= 1'b1;
     end
+
+`ifdef GW5A
+    // ------------------------------------------------------------------ front USB-A ports
+    // USB host on the FPGA for gamepads on the Console's front USB-A ports, as in the other
+    // Console cores (usb_hid_host.v, 12 MHz from its own PLL). Their buttons go to the pads and
+    // the menu like the board's own pads.
+    logic        clk12, pll_lock_12;
+    logic [11:0] joy_usb1_12, joy_usb2_12, joy_usb1, joy_usb2;
+    pll_12 u_pll_12 (.clkin(sys_clk), .clkout0(clk12), .lock(pll_lock_12));
+    usb_hid_host u_usb1 (
+        .usbclk(clk12), .usbrst_n(pll_lock_12),
+        .usb_dm(usb1_dn), .usb_dp(usb1_dp), .game_snes(joy_usb1_12)
+    );
+    usb_hid_sync u_usb1_sync (.clk(clkm_32MHZ), .d(joy_usb1_12), .q(joy_usb1));
+`ifdef USB2
+    usb_hid_host u_usb2 (
+        .usbclk(clk12), .usbrst_n(pll_lock_12),
+        .usb_dm(usb2_dn), .usb_dp(usb2_dp), .game_snes(joy_usb2_12)
+    );
+    usb_hid_sync u_usb2_sync (.clk(clkm_32MHZ), .d(joy_usb2_12), .q(joy_usb2));
+`else
+    assign joy_usb2 = '0;
+`endif
+`endif
 
     // ------------------------------------------------------------------ iosys (BL616 link)
     logic        overlay, osd_strip;
@@ -183,8 +286,13 @@ module top (
         .overlay_x     (overlay_x),
         .overlay_y     (overlay_y),
         .overlay_color (overlay_color),
+`ifdef GW5A
+        .joy1          (joy1_snes | joy1_ds2 | joy_usb1),   // the board's own pads and front
+        .joy2          (joy2_snes | joy2_ds2 | joy_usb2),   // USB ports, for the menu
+`else
         .joy1          (joy1_snes | joy1_ds2),  // the board's own pads, for the menu
         .joy2          (joy2_snes | joy2_ds2),
+`endif
         .hid1          (hid1),
         .hid2          (hid2),
         .rom_loading   (rom_loading),
@@ -216,6 +324,7 @@ module top (
     always_ff @(posedge clkm_32MHZ) cfg <= core_config;
 
     // ------------------------------------------------------------------ gamepads
+`ifdef CONTROLLER_SNES
     controller_snes #(.FREQ(CLK32_HZ)) u_joy1_snes (
         .clk(clkm_32MHZ), .resetn(sys_resetn), .buttons(joy1_snes),
         .joy_strb(joy1_strb), .joy_clk(joy1_clk), .joy_data(joy1_data)
@@ -224,6 +333,11 @@ module top (
         .clk(clkm_32MHZ), .resetn(sys_resetn), .buttons(joy2_snes),
         .joy_strb(joy2_strb), .joy_clk(joy2_clk), .joy_data(joy2_data)
     );
+`else
+    assign joy1_snes = '0;
+    assign joy2_snes = '0;
+`endif
+`ifdef CONTROLLER_DS2
     controller_ds2 #(.FREQ(CLK32_HZ)) u_joy1_ds2 (
         .clk(clkm_32MHZ), .snes_buttons(joy1_ds2),
         .ds_clk(ds_clk), .ds_miso(ds_miso), .ds_mosi(ds_mosi), .ds_cs(ds_cs)
@@ -232,10 +346,19 @@ module top (
         .clk(clkm_32MHZ), .snes_buttons(joy2_ds2),
         .ds_clk(ds_clk2), .ds_miso(ds_miso2), .ds_mosi(ds_mosi2), .ds_cs(ds_cs2)
     );
+`else
+    assign joy1_ds2 = '0;
+    assign joy2_ds2 = '0;
+`endif
 
     // All sources of each pad, SNES layout, 1 = pressed
+`ifdef GW5A
+    wire [11:0] pad1 = joy1_snes | joy1_ds2 | hid1[11:0] | joy_usb1;
+    wire [11:0] pad2 = joy2_snes | joy2_ds2 | hid2[11:0] | joy_usb2;
+`else
     wire [11:0] pad1 = joy1_snes | joy1_ds2 | hid1[11:0];
     wire [11:0] pad2 = joy2_snes | joy2_ds2 | hid2[11:0];
+`endif
     wire [11:0] pads = pad1 | pad2;
 
     // Controls, 1 = pressed
@@ -303,9 +426,13 @@ module top (
         if (dip_s == dip_s2) dip_48 <= dip_s;
     end
 
-    // S1 is active high.
+    // S1 is active high (Console: active low, inverted here).
     logic [1:0] s1_sr = 2'b00;
+`ifdef S1_ACTIVE_LOW
+    always_ff @(posedge clkm_48MHZ) s1_sr <= {s1_sr[0], ~s1};
+`else
     always_ff @(posedge clkm_48MHZ) s1_sr <= {s1_sr[0], s1};
+`endif
 
     // Debounce: s1_db takes the synchronised level only after it has differed from s1_db for
     // 2^S1_DB_BITS consecutive clocks; any bounce back restarts the count.
@@ -402,8 +529,13 @@ module top (
         .blankn        (blankn),
         .vs            (vs),
         .rotate        (cfg[16]),
+`ifdef GW5A
+        .clk_sd        (clk_sd),
+        .resetn        (sd_resetn),
+`else
         .clk_sd        (clkm_32MHZ),
         .resetn        (sys_resetn),
+`endif
         .clk_pix       (hclk),
         .cx            (cx),
         .cy            (cy),
@@ -423,8 +555,11 @@ module top (
         .sdram_cs_n    (O_sdram_cs_n),
         .sdram_ras_n   (O_sdram_ras_n),
         .sdram_cas_n   (O_sdram_cas_n),
-        .sdram_we_n    (O_sdram_wen_n),
+        .sdram_we_n    (O_sdram_wen_n)
+`ifndef SDRAM16
+        ,
         .sdram_cke     (O_sdram_cke)
+`endif
     );
 
     // ------------------------------------------------------------------ audio
