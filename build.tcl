@@ -97,7 +97,16 @@ set_option -top_module top
 set_option -verilog_std sysv2017
 set_option -vhdl_std vhd2008
 set_option -rw_check_on_ram 1
-set_option -place_option 2
+# place/route options (RF_PLACE / RF_ROUTE override them, for trying others). The Console
+# 138K uses place 3 / route 2: its SNES-controller build missed clk48 with place 2 (-1.5 ns),
+# and in a sweep of place 0-4 x route 0-2 (2026-11-15) 3/2 had the most margin (clk48 50.5 MHz).
+set place_option 2
+set route_option ""
+if {$dev eq "console138k"} { set place_option 3; set route_option 2 }
+if {[info exists ::env(RF_PLACE)]} { set place_option $::env(RF_PLACE) }
+if {[info exists ::env(RF_ROUTE)]} { set route_option $::env(RF_ROUTE) }
+set_option -place_option $place_option
+if {$route_option ne ""} { set_option -route_option $route_option }
 # registers that connect straight to a pin go into the I/O block, so the SDRAM and
 # other pin timing does not change with placement
 set_option -ireg_in_iob 1
